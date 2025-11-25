@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from vllm import LLM, SamplingParams
 
@@ -55,10 +55,19 @@ class ReasoningActor:
         )
 
     def generate(self, prompt: str) -> ActorResponse:
-        logging.debug("Generating response for prompt of length %d", len(prompt))
-        outputs = self.llm.generate([prompt], sampling_params=self.sampling_params, use_tqdm=False)
-        request_output = outputs[0]
-        completion = request_output.outputs[0]
+        return self.generate_batch([prompt])[0]
+
+    def generate_batch(self, prompts: List[str]) -> List[ActorResponse]:
+        logging.debug("Generating batch of %d prompts", len(prompts))
+        outputs = self.llm.generate(prompts, sampling_params=self.sampling_params, use_tqdm=False)
+        responses: List[ActorResponse] = []
+        for request_output in outputs:
+            completion = request_output.outputs[0]
+            responses.append(self._build_response(completion))
+        return responses
+
+    @staticmethod
+    def _build_response(completion) -> ActorResponse:
         text = completion.text.strip()
         final_answer = extract_final_answer(text)
         reasoning = text

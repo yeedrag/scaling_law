@@ -1,6 +1,6 @@
 import dataclasses
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -21,6 +21,7 @@ class ExperimentConfig:
     qwen_max_model_len: int
     output_dir: str
     random_seed: int
+    actor_batch_size: int = 1
 
 
 def _expand_env(value: Any) -> Any:
