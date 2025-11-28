@@ -1,0 +1,8 @@
+{
+  "total_samples": 20,
+  "baseline_accuracy": 0.75,
+  "evasion_accuracy": 0.5,
+  "evasion_success_rate": 0.0,
+  "monitor_detection_rate": 1.0,
+  "avg_baseline_reasoning_tokens": 573.8
+}

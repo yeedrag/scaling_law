@@ -5,10 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
+from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
-
-
-FINAL_ANSWER_REGEX = re.compile(r"final answer\s*[:\-]\s*(.+)", re.IGNORECASE)
 
 
 @dataclass
@@ -20,7 +18,7 @@ class ActorResponse:
 
 
 class ReasoningActor:
-    """Wrapper around vLLM for Qwen3 32B thinking model."""
+    """Wrapper around vLLM for reasoning models with chat template support."""
 
     def __init__(
         self,
@@ -44,6 +42,7 @@ class ReasoningActor:
             llm_kwargs["tensor_parallel_size"] = tensor_parallel_size
 
         self.llm = LLM(**llm_kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         self.sampling_params = SamplingParams(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -52,6 +51,16 @@ class ReasoningActor:
             seed=seed,
             n=1,
             repetition_penalty=1.0,
+            stop=["</answer>"],  # Stop after answer tag
+        )
+
+    def _apply_chat_template(self, user_message: str) -> str:
+        """Apply the model's chat template to format the prompt correctly."""
+        messages = [{"role": "user", "content": user_message}]
+        return self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
         )
 
     def generate(self, prompt: str) -> ActorResponse:
@@ -59,7 +68,9 @@ class ReasoningActor:
 
     def generate_batch(self, prompts: List[str]) -> List[ActorResponse]:
         logging.debug("Generating batch of %d prompts", len(prompts))
-        outputs = self.llm.generate(prompts, sampling_params=self.sampling_params, use_tqdm=False)
+        # Apply chat template to each prompt
+        formatted_prompts = [self._apply_chat_template(p) for p in prompts]
+        outputs = self.llm.generate(formatted_prompts, sampling_params=self.sampling_params, use_tqdm=False)
         responses: List[ActorResponse] = []
         for request_output in outputs:
             completion = request_output.outputs[0]
@@ -69,8 +80,20 @@ class ReasoningActor:
     @staticmethod
     def _build_response(completion) -> ActorResponse:
         text = completion.text.strip()
-        final_answer = extract_final_answer(text)
-        reasoning = text
+        
+        # Extract reasoning from <think>...</think> tags
+        reasoning = extract_think(text)
+        if reasoning:
+            logging.debug("Extracted reasoning from <think> tags: %d chars", len(reasoning))
+        else:
+            reasoning = text
+            logging.debug("No <think> tags found, using full text: %d chars", len(reasoning))
+        
+        # Extract final answer from <answer>...</answer> tags
+        final_answer = extract_answer(text)
+        if final_answer:
+            logging.debug("Extracted answer from <answer> tags: %s", final_answer[:50])
+        
         token_count = len(completion.token_ids)
         return ActorResponse(
             text=text,
@@ -80,9 +103,18 @@ class ReasoningActor:
         )
 
 
-def extract_final_answer(text: str) -> Optional[str]:
-    match = FINAL_ANSWER_REGEX.search(text)
-    if match:
-        return match.group(1).strip()
+def extract_think(text: str) -> Optional[str]:
+    """Extract thinking content (everything before </think> tag)."""
+    if '</think>' in text.lower():
+        idx = text.lower().find('</think>')
+        return text[:idx].strip() or None
+    return None
+
+
+def extract_answer(text: str) -> Optional[str]:
+    """Extract content between <answer> and </answer> tags (last instance)."""
+    matches = re.findall(r'<answer>(.*?)</answer>', text, re.DOTALL | re.IGNORECASE)
+    if matches:
+        return matches[-1].strip()
     return None
 

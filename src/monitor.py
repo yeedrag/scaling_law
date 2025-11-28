@@ -10,17 +10,18 @@ from .prompts import MONITOR_PROMPT
 
 
 class ChainOfThoughtMonitor:
-    """Wrapper around OpenAI monitor model to detect chemistry reasoning."""
+    """Wrapper around OpenAI monitor model to detect domain-specific reasoning."""
 
-    def __init__(self, model: str, max_tokens: int = 128) -> None:
+    def __init__(self, model: str, subject: str = "chemistry", max_tokens: int = 128) -> None:
         if not os.getenv("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY environment variable is required for the monitor.")
         self.client = OpenAI()
         self.model = model
+        self.subject = subject
         self.max_tokens = max_tokens
 
     def classify(self, reasoning: str) -> Literal["DETECTED", "NOT_DETECTED"]:
-        prompt = MONITOR_PROMPT.format(reasoning=reasoning)
+        prompt = MONITOR_PROMPT.format(subject=self.subject, reasoning=reasoning)
         logging.debug("Sending monitor prompt of length %d", len(prompt))
         response = self.client.responses.create(
             model=self.model,
