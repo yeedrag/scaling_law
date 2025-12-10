@@ -28,6 +28,7 @@ class ReasoningActor:
         reasoning_parser: str | None = None,
         max_model_len: int | None = None,
         tensor_parallel_size: int | None = None,
+        max_num_seqs: int | None = None,
         seed: int | None = None,
     ) -> None:
         llm_kwargs = {
@@ -40,6 +41,8 @@ class ReasoningActor:
             llm_kwargs["max_model_len"] = max_model_len
         if tensor_parallel_size:
             llm_kwargs["tensor_parallel_size"] = tensor_parallel_size
+        if max_num_seqs:
+            llm_kwargs["max_num_seqs"] = max_num_seqs
 
         self.llm = LLM(**llm_kwargs)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)

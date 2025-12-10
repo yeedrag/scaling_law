@@ -150,13 +150,13 @@ def extract_final_answer(text: str) -> Optional[str]:
     return None
 
 
-async def call_openai_async(client: AsyncOpenAI, model: str, prompt: str, temperature: float = 0.0) -> str:
+async def call_openai_async(client: AsyncOpenAI, model: str, prompt: str, temperature: float = 1.0) -> str:
     """Async OpenAI chat completion."""
     resp = await client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
-        max_completion_tokens=256,
+        max_completion_tokens=1024,
     )
     return resp.choices[0].message.content or ""
 
@@ -214,7 +214,7 @@ def extract_direct_answer(text: str) -> Optional[str]:
 def main():
     parser = argparse.ArgumentParser(description="Filter GSM8K for reasoning-necessary questions")
     parser.add_argument("--model", default="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B")
-    parser.add_argument("--judge-model", default="gpt-4o-mini")
+    parser.add_argument("--judge-model", default="gpt-5-nano")
     parser.add_argument("--limit", type=int, default=100, help="Number of questions to process")
     parser.add_argument("--split", default="train", help="Dataset split to use")
     parser.add_argument("--tensor-parallel-size", type=int, default=None)
@@ -247,17 +247,43 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     
     # Sampling params
-    direct_sampling = SamplingParams(temperature=0.0, max_tokens=64, top_p=1.0)
-    reasoning_sampling = SamplingParams(temperature=0.6, max_tokens=2048, top_p=0.9)
+    direct_sampling = SamplingParams(temperature=1, max_tokens=10, top_p=1.0)
+    reasoning_sampling = SamplingParams(temperature=1, max_tokens=2048, top_p=0.9)
 
     async_client = AsyncOpenAI()
 
     # ==========================================================================
-    # Step 1: Run direct answers (no reasoning) - multiple times per question
+    # Combined generation + judging pipeline (process in parallel)
     # ==========================================================================
     print("\n" + "=" * 60)
-    print(f"Step 1: Running DIRECT answers (no reasoning) - {args.direct_runs} times per question")
+    print("Running generation and judging in parallel")
     print("=" * 60)
+    
+    # We'll accumulate judging tasks as we generate
+    all_judge_tasks = []
+    direct_results = []
+    reasoning_results = []
+    direct_extracted_all = []
+    reasoning_extracted = []
+    
+    async def judge_batch(batch_tasks):
+        """Judge a batch of answers with rate limiting."""
+        CHUNK_SIZE = 100
+        all_results = []
+        for chunk_idx in range(0, len(batch_tasks), CHUNK_SIZE):
+            chunk = batch_tasks[chunk_idx:chunk_idx + CHUNK_SIZE]
+            print(f"      Judging chunk {chunk_idx//CHUNK_SIZE + 1}/{(len(batch_tasks) + CHUNK_SIZE - 1)//CHUNK_SIZE} ({len(chunk)} requests)...")
+            chunk_results = await asyncio.gather(*chunk)
+            all_results.extend(chunk_results)
+            if chunk_idx + CHUNK_SIZE < len(batch_tasks):
+                await asyncio.sleep(1.0)
+        return all_results
+    
+    # ==========================================================================
+    # Step 1: Direct answers - generate and judge in batches
+    # ==========================================================================
+    print(f"\nStep 1: DIRECT answers (no reasoning) - {args.direct_runs} times per question")
+    print("-" * 60)
     
     # Generate prompts: each question repeated args.direct_runs times
     direct_prompts = []
@@ -268,32 +294,42 @@ def main():
         for _ in range(args.direct_runs):
             direct_prompts.append(formatted)
     
-    # Generate all direct answers
+    print(f"  Generating {len(direct_prompts)} direct answers...")
     direct_outputs = llm.generate(direct_prompts, direct_sampling)
     
-    # Group results by problem (each problem has args.direct_runs attempts)
-    direct_results = []
+    print("  Extracting and judging direct answers...")
+    # Extract and prepare judging tasks immediately
+    direct_judge_tasks = []
     for i, p in enumerate(problems):
         attempts = []
         for run_idx in range(args.direct_runs):
             prompt_idx = i * args.direct_runs + run_idx
             text = direct_outputs[prompt_idx].outputs[0].text.strip()
+            extracted = extract_direct_answer(text)
+            direct_extracted_all.append(extracted)
             attempts.append({
                 "run": run_idx + 1,
                 "raw_output": text,
             })
+            # Create judging task
+            direct_judge_tasks.append(
+                judge_correctness_async(async_client, args.judge_model, p.answer, extracted)
+            )
         direct_results.append({
             "question": p.question,
             "expected": p.answer,
             "attempts": attempts,
         })
     
+    # Judge direct answers
+    direct_judgments_all = asyncio.run(judge_batch(direct_judge_tasks))
+    print(f"  ✓ Direct: {sum(direct_judgments_all)}/{len(direct_judgments_all)} correct")
+    
     # ==========================================================================
-    # Step 2: Run reasoning answers (CoT)
+    # Step 2: Reasoning answers - generate and judge in batches
     # ==========================================================================
-    print("\n" + "=" * 60)
-    print("Step 2: Running REASONING answers (CoT)")
-    print("=" * 60)
+    print(f"\nStep 2: REASONING answers (CoT)")
+    print("-" * 60)
     
     reasoning_prompts = []
     for p in problems:
@@ -302,95 +338,42 @@ def main():
         formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         reasoning_prompts.append(formatted)
     
+    print(f"  Generating {len(reasoning_prompts)} reasoning answers...")
     reasoning_outputs = llm.generate(reasoning_prompts, reasoning_sampling)
     
-    reasoning_results = []
+    print("  Extracting and judging reasoning answers...")
+    # Extract and prepare judging tasks immediately
+    reasoning_judge_tasks = []
     for p, out in zip(problems, reasoning_outputs):
         text = out.outputs[0].text.strip()
+        extracted = extract_final_answer(text)
+        reasoning_extracted.append(extracted)
         reasoning_results.append({
             "question": p.question,
             "expected": p.answer,
             "raw_output": text,
         })
-
+        # Create judging task
+        reasoning_judge_tasks.append(
+            judge_correctness_async(async_client, args.judge_model, p.answer, extracted)
+        )
+    
+    # Judge reasoning answers
+    reasoning_correct = asyncio.run(judge_batch(reasoning_judge_tasks))
+    print(f"  ✓ Reasoning: {sum(reasoning_correct)}/{len(reasoning_correct)} correct")
+    
     # ==========================================================================
-    # Step 3: Extract answers with regex, then judge with LLM
+    # Step 3: Print extraction stats
     # ==========================================================================
-    print("\n" + "=" * 60)
-    print("Step 3: Extracting answers and judging correctness")
-    print("=" * 60)
-    
-    # First, extract all answers using regex patterns
-    print("  Extracting answers with regex...")
-    
-    # Extract from all direct attempts (multiple per question)
-    direct_extracted_all = []
-    for r in direct_results:
-        for attempt in r["attempts"]:
-            extracted = extract_direct_answer(attempt["raw_output"])
-            direct_extracted_all.append(extracted)
-    
-    # Extract from reasoning answers (one per question)
-    reasoning_extracted = []
-    for r in reasoning_results:
-        extracted = extract_final_answer(r["raw_output"])
-        reasoning_extracted.append(extracted)
-    
-    # Count extraction success
+    print(f"\nExtraction stats:")
     direct_success = sum(1 for e in direct_extracted_all if e is not None)
     reasoning_success = sum(1 for e in reasoning_extracted if e is not None)
     print(f"  Direct extraction: {direct_success}/{len(direct_extracted_all)} successful")
     print(f"  Reasoning extraction: {reasoning_success}/{len(reasoning_extracted)} successful")
     
-    # Now judge correctness using LLM (with rate limiting)
-    print("  Judging correctness with LLM (batched to avoid rate limits)...")
-    
-    async def judge_all_with_rate_limit():
-        # Batch judgments to avoid rate limits (OpenAI: 500 RPM)
-        # Process in chunks of 100 with a small delay between chunks
-        CHUNK_SIZE = 100
-        
-        all_tasks = []
-        # Direct answers - judge all attempts
-        for i, r in enumerate(direct_results):
-            for attempt_idx in range(args.direct_runs):
-                extracted_idx = i * args.direct_runs + attempt_idx
-                all_tasks.append((
-                    'direct',
-                    judge_correctness_async(
-                        async_client, args.judge_model, 
-                        r["expected"], direct_extracted_all[extracted_idx]
-                    )
-                ))
-        # Reasoning answers - one per question
-        for i, r in enumerate(reasoning_results):
-            all_tasks.append((
-                'reasoning',
-                judge_correctness_async(
-                    async_client, args.judge_model,
-                    r["expected"], reasoning_extracted[i]
-                )
-            ))
-        
-        # Process in chunks
-        all_results = []
-        for chunk_idx in range(0, len(all_tasks), CHUNK_SIZE):
-            chunk = all_tasks[chunk_idx:chunk_idx + CHUNK_SIZE]
-            chunk_tasks = [task for _, task in chunk]
-            
-            print(f"    Processing chunk {chunk_idx//CHUNK_SIZE + 1}/{(len(all_tasks) + CHUNK_SIZE - 1)//CHUNK_SIZE} ({len(chunk_tasks)} requests)...")
-            chunk_results = await asyncio.gather(*chunk_tasks)
-            all_results.extend(chunk_results)
-            
-            # Small delay between chunks to avoid rate limits
-            if chunk_idx + CHUNK_SIZE < len(all_tasks):
-                await asyncio.sleep(1.0)
-        
-        n_direct = len(direct_results) * args.direct_runs
-        return all_results[:n_direct], all_results[n_direct:]
-    
-    direct_judgments_all, reasoning_correct = asyncio.run(judge_all_with_rate_limit())
-    
+    # ==========================================================================
+    # Step 4: Group judgments and categorize
+    # ==========================================================================
     # Group direct judgments by question - a question is "correct" if ANY attempt succeeds
     direct_correct = []
     direct_attempt_details = []
@@ -411,12 +394,8 @@ def main():
         # Question is "correct" if ANY attempt succeeded
         any_correct = any(question_judgments)
         direct_correct.append(any_correct)
-
-    # ==========================================================================
-    # Step 4: Filter and categorize
-    # ==========================================================================
     print("\n" + "=" * 60)
-    print("Step 4: Filtering and categorizing")
+    print("Filtering and categorizing")
     print("=" * 60)
     
     # Categories:
@@ -470,7 +449,7 @@ def main():
     print(f"  Reasoning mode stats: {sum(reasoning_correct)}/{len(reasoning_correct)} succeeded ({100*sum(reasoning_correct)/len(reasoning_correct):.1f}%)")
 
     # ==========================================================================
-    # Step 5: Save results
+    # Save results
     # ==========================================================================
     output_data = {
         "model": args.model,

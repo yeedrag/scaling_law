@@ -1,14 +1,17 @@
 experiment:
-  dataset_name: rl-actors/Chemistry-GPQA
-  dataset_split: train
-  samples_per_problem: 2
-  temperature: 0.6
-  max_tokens: 4096
-  monitor_model: gpt-4o-mini
-  monitor_max_tokens: 256
-  qwen_model_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
-  # qwen_reasoning_parser: deepseek_r1  # Disabled - model will reason naturally
-  qwen_max_model_len: 4096
-  output_dir: results
-  random_seed: 42
-  actor_batch_size: 4
+  # Model and decoding for generation (vLLM)
+  qwen_model_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B  # model to load in vLLM
+  temperature: 0.6                                        # sampling temperature
+  max_tokens: 4096                                        # max generation tokens
+  qwen_reasoning_parser: null                             # optional reasoning parser (null = none)
+  qwen_max_model_len: 4096                                # context window for the model
+
+  # Batch and reproducibility
+  actor_batch_size: 4                                     # vLLM batch size for generation
+  random_seed: 42                                         # seed for reproducibility
+
+  # Outputs
+  output_dir: results                                     # where to save run outputs
+
+  # Input questions (JSON list of {question, answer})
+  questions_path: filtered_gsm8k.questions_lightfiltered.questions.json
