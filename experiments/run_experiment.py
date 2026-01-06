@@ -92,7 +92,7 @@ async def openai_call(client: AsyncOpenAI, model: str, prompt: str, temp: float,
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=temp,
-            max_completion_tokens=2048,
+            max_completion_tokens=8192,
         )
     return resp.choices[0].message.content or ""
 

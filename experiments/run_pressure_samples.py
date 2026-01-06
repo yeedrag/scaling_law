@@ -31,6 +31,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import mean
 from typing import Any, Dict, List, Set
 
 from openai import AsyncOpenAI
@@ -59,10 +60,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--samples", type=int, default=20, help="Samples per question.")
     p.add_argument("--autorater-model", default="gpt-5.1", help="Model for coverage/legibility scoring.")
     p.add_argument("--judge-model", default="gpt-5-nano", help="Model for correctness judging.")
-    p.add_argument("--openai-concurrency", type=int, default=32, help="Max concurrent OpenAI calls.")
+    p.add_argument("--openai-concurrency", type=int, default=64, help="Max concurrent OpenAI calls.")
     p.add_argument("--output", default="results/pressure_samples.jsonl", help="Output JSONL path.")
     p.add_argument("--seed", type=int, default=42, help="Seed; -1 to disable seeding.")
-    p.add_argument("--chunk-size", type=int, default=16, help="Process questions in chunks to allow incremental writes.")
+    p.add_argument("--chunk-size", type=int, default=128, help="Process questions in chunks to allow incremental writes.")
     return p.parse_args()
 
 
@@ -166,7 +167,7 @@ async def main_async(args: argparse.Namespace) -> None:
             idx_to_question[idx] = p.question
 
         logging.info("Chunk %s/%s: generating %s prompts for %s questions", start // args.chunk_size + 1, (len(pending)+args.chunk_size-1)//args.chunk_size, len(prompts), len(chunk))
-        outputs = actor.llm.generate(prompts, sampling_params=actor.sampling_params, use_tqdm=False)
+        outputs = actor.llm.generate(prompts, sampling_params=actor.sampling_params, use_tqdm=True)
 
         per_q_raw: Dict[int, List[dict]] = defaultdict(list)
         for out, idx in zip(outputs, owners):

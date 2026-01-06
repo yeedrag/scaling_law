@@ -7,7 +7,7 @@ experiment:
   qwen_max_model_len: 4096                                # context window for the model
 
   # Batch and reproducibility
-  actor_batch_size: 4                                     # vLLM batch size for generation
+  actor_batch_size: 2048                                     # vLLM batch size for generation
   random_seed: 42                                         # seed for reproducibility
 
   # Outputs
